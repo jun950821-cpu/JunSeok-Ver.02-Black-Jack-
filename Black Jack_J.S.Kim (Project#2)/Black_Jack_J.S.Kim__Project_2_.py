@@ -308,6 +308,16 @@ else:
             st.markdown("<h3 style='text-align:center; color:#e0e7ff;'>🤖 딜러</h3>", unsafe_allow_html=True)
             hide_dealer_card = (st.session_state.game_phase in ['PLAYING', 'DEALER_TURN'])
             st.markdown(render_cards(st.session_state.dealer_hand, hide_second=hide_dealer_card), unsafe_allow_html=True)
+            
+            # --- 💡 딜러 점수 추가 부분 ---
+            if hide_dealer_card:
+                visible_score = calculate_score([st.session_state.dealer_hand[0]])
+                st.markdown(f"<p style='text-align:center; color:#94a3b8; font-size:1.1rem; margin-top:-10px;'>오픈된 점수: <b>{visible_score}</b></p>", unsafe_allow_html=True)
+            else:
+                final_score = calculate_score(st.session_state.dealer_hand)
+                st.markdown(f"<p style='text-align:center; color:#facc15; font-size:1.1rem; margin-top:-10px;'>최종 점수: <b>{final_score}</b></p>", unsafe_allow_html=True)
+            # -----------------------------
+            
             st.divider()
             st.markdown("<h3 style='text-align:center; color:#e0e7ff;'>🙋‍♂️ 플레이어</h3>", unsafe_allow_html=True)
             for i, hand in enumerate(st.session_state.player_hands):
@@ -315,7 +325,7 @@ else:
                 style = "border: 2px solid #facc15; border-radius: 15px;" if is_active else ""
                 st.markdown(f"<div style='{style}'>", unsafe_allow_html=True)
                 st.markdown(render_cards(hand), unsafe_allow_html=True)
-                st.markdown(f"<p style='text-align:center;'>점수: {calculate_score(hand)} (배팅: {st.session_state.hand_bets[i]})</p>", unsafe_allow_html=True)
+                st.markdown(f"<p style='text-align:center; font-size:1.1rem;'>점수: <b>{calculate_score(hand)}</b> (배팅: {st.session_state.hand_bets[i]})</p>", unsafe_allow_html=True)
                 st.markdown("</div>", unsafe_allow_html=True)
 
             if st.session_state.game_phase == 'PLAYING':
