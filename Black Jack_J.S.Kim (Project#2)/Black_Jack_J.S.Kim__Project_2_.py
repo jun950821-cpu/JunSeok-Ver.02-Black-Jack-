@@ -1,6 +1,7 @@
 import streamlit as st
 import random
 from supabase import create_client, Client
+from datetime import datetime, timedelta, timezone
 
 # --- 🎮 Web Page Configuration ---
 st.set_page_config(page_title="JS Casino Blackjack", page_icon="🃏", layout="centered")
@@ -29,6 +30,7 @@ st.markdown("""
         h1 { color: #facc15 !important; text-align: center !important; text-shadow: 0 4px 6px rgba(0,0,0,0.5); font-size: 3.5rem !important; margin-bottom: 0 !important;}
         
         .coin-box { background-color: rgba(0, 0, 0, 0.6); border: 2px solid #facc15; padding: 15px; border-radius: 10px; text-align: center; color: #facc15; font-size: 1.5rem; box-shadow: 0 4px 10px rgba(0,0,0,0.5); margin: 10px 0; }
+        .timer-box { border-color: #3b82f6 !important; color: #3b82f6 !important; }
         .debt-box { border-color: #f43f5e !important; color: #f43f5e !important; }
         .combo-box { border-color: #34d399 !important; color: #34d399 !important; }
         
@@ -45,19 +47,21 @@ st.markdown("""
         .btn-red>button:hover { background-color: #f43f5e !important; color: white !important; box-shadow: 0 0 15px #f43f5e !important;}
         .btn-yellow>button { border-color: #facc15 !important; color: #facc15 !important; }
         .btn-yellow>button:hover { background-color: #facc15 !important; color: black !important; box-shadow: 0 0 15px #facc15 !important;}
+        .btn-blue>button { border-color: #3b82f6 !important; color: #3b82f6 !important; }
+        .btn-blue>button:hover { background-color: #3b82f6 !important; color: white !important; box-shadow: 0 0 15px #3b82f6 !important;}
         .stNumberInput input { background-color: rgba(0,0,0,0.5) !important; color: #facc15 !important; border: 1px solid #facc15 !important; font-size: 1.5rem !important; text-align: center !important; }
     </style>
 """, unsafe_allow_html=True)
 
 # ==========================================
-# 💾 데이터베이스 함수
+# 💾 데이터베이스 & 시스템 함수
 # ==========================================
 def load_user(username):
     response = supabase.table("casino_players").select("*").eq("username", username).execute()
     if len(response.data) > 0:
         return response.data[0]
     else:
-        new_user = {"username": username, "coins": 1000, "debt": 0, "combo": 0}
+        new_user = {"username": username, "coins": 1000, "debt": 0, "combo": 0, "last_rescue": None}
         res = supabase.table("casino_players").insert(new_user).execute()
         return res.data[0]
 
@@ -68,6 +72,32 @@ def save_user_data():
             "debt": st.session_state.debt,
             "combo": st.session_state.combo
         }).eq("username", st.session_state.username).execute()
+
+def get_rescue_time_left():
+    if not st.session_state.get('last_rescue'): return 0
+    last = datetime.fromisoformat(st.session_state.last_rescue)
+    now = datetime.now(timezone.utc)
+    diff = now - last
+    if diff > timedelta(minutes=3): return 0  # ⏰ 3분으로 수정!
+    return (timedelta(minutes=3) - diff).seconds
+
+def claim_rescue():
+    now_iso = datetime.now(timezone.utc).isoformat()
+    supabase.table("casino_players").update({
+        "coins": 500, "last_rescue": now_iso
+    }).eq("username", st.session_state.username).execute()
+    st.session_state.coins = 500
+    st.session_state.last_rescue = now_iso
+
+def reset_game_completely():
+    # 💀 DIE / LOSE 발생 시 완전히 처음부터 초기화하는 함수
+    st.session_state.coins = 1000
+    st.session_state.debt = 0
+    st.session_state.combo = 0
+    st.session_state.game_phase = 'BETTING'
+    st.session_state.player_hands = []
+    st.session_state.dealer_hand = []
+    save_user_data()
 
 # ==========================================
 # 🃏 엔진 및 시각화 함수
@@ -97,82 +127,106 @@ def render_cards(hand, hide_second=False):
         suit, rank = card[0], card[1:]
         color_class = "card-red" if suit in ['♥', '♦'] else "card-black"
         html += f'<div class="real-card {color_class}"><div class="card-top">{rank}<br>{suit}</div><div class="card-center">{suit}</div></div>'
-    return f'<div style="text-align:center; margin: 20px 0; display:flex; justify-content:center; flex-wrap:wrap;">{html}</div>'
-
-def get_combo_multiplier():
-    if st.session_state.combo >= 4: return 2.0
-    elif st.session_state.combo >= 3: return 1.5
-    return 1.0
+    return f'<div style="text-align:center; margin: 10px 0; display:flex; justify-content:center; flex-wrap:wrap;">{html}</div>'
 
 # ==========================================
-# 🧠 세션 상태 (메모리)
+# 🧠 세션 상태 (메모리) 초기화
 # ==========================================
-if 'logged_in' not in st.session_state: st.session_state.logged_in = False
+if 'logged_in' not in st.session_state: 
+    st.session_state.logged_in = False
+    st.session_state.player_hands = []
+    st.session_state.hand_bets = []
+    st.session_state.active_hand = 0
 
 # ==========================================
-# 🎮 게임 로직
+# 🎮 게임 로직 (스플릿 포함)
 # ==========================================
 def start_game(bet):
-    st.session_state.current_bet = bet
+    st.session_state.hand_bets = [bet]
     st.session_state.coins -= bet
     if len(st.session_state.deck) < 15: st.session_state.deck = create_deck()
-    st.session_state.player_hand = [st.session_state.deck.pop(), st.session_state.deck.pop()]
+    
+    st.session_state.player_hands = [[st.session_state.deck.pop(), st.session_state.deck.pop()]]
     st.session_state.dealer_hand = [st.session_state.deck.pop(), st.session_state.deck.pop()]
+    st.session_state.active_hand = 0
     st.session_state.game_phase = 'PLAYING'
     st.session_state.msg = ""
     
-    if calculate_score(st.session_state.player_hand) == 21:
+    if calculate_score(st.session_state.player_hands[0]) == 21:
         st.session_state.game_phase = 'GAME_OVER'
         st.session_state.combo += 1
         st.session_state.msg = "🎉 대박! 첫 판에 블랙잭!! (배팅액의 2.5배 획득)"
         st.session_state.coins += int(bet * 2.5)
-        save_user_data() # DB 저장
+        save_user_data()
+
+def split():
+    bet = st.session_state.hand_bets[0]
+    st.session_state.coins -= bet
+    st.session_state.hand_bets.append(bet)
+    
+    c1, c2 = st.session_state.player_hands[0][0], st.session_state.player_hands[0][1]
+    st.session_state.player_hands = [
+        [c1, st.session_state.deck.pop()],
+        [c2, st.session_state.deck.pop()]
+    ]
+
+def next_hand_or_dealer():
+    st.session_state.active_hand += 1
+    if st.session_state.active_hand >= len(st.session_state.player_hands):
+        st.session_state.game_phase = 'DEALER_TURN'
 
 def hit():
-    st.session_state.player_hand.append(st.session_state.deck.pop())
-    if calculate_score(st.session_state.player_hand) > 21:
-        st.session_state.game_phase = 'GAME_OVER'
-        st.session_state.combo = 0
-        st.session_state.msg = "💥 BUST! 21점을 초과했습니다. 딜러가 승리했습니다."
-        save_user_data() # DB 저장
+    idx = st.session_state.active_hand
+    st.session_state.player_hands[idx].append(st.session_state.deck.pop())
+    if calculate_score(st.session_state.player_hands[idx]) > 21:
+        next_hand_or_dealer()
 
 def double_down():
-    st.session_state.coins -= st.session_state.current_bet
-    st.session_state.current_bet *= 2
-    st.session_state.player_hand.append(st.session_state.deck.pop())
-    if calculate_score(st.session_state.player_hand) > 21:
-        st.session_state.game_phase = 'GAME_OVER'
-        st.session_state.combo = 0
-        st.session_state.msg = "💥 BUST! 더블다운 실패... 21점을 초과했습니다."
-        save_user_data() # DB 저장
-    else:
-        st.session_state.game_phase = 'DEALER_TURN'
+    idx = st.session_state.active_hand
+    st.session_state.coins -= st.session_state.hand_bets[idx]
+    st.session_state.hand_bets[idx] *= 2
+    st.session_state.player_hands[idx].append(st.session_state.deck.pop())
+    next_hand_or_dealer()
 
 def reveal_dealer():
     st.session_state.game_phase = 'GAME_OVER'
+    all_busted = all(calculate_score(h) > 21 for h in st.session_state.player_hands)
     dealer_score = calculate_score(st.session_state.dealer_hand)
-    while dealer_score < 17:
-        st.session_state.dealer_hand.append(st.session_state.deck.pop())
-        dealer_score = calculate_score(st.session_state.dealer_hand)
-    player_score = calculate_score(st.session_state.player_hand)
-    multiplier = get_combo_multiplier()
-
-    if dealer_score > 21:
-        st.session_state.combo += 1
-        st.session_state.msg = f"🎉 딜러 BUST! 플레이어 승리! (수익 {multiplier}배)"
-        st.session_state.coins += st.session_state.current_bet + int(st.session_state.current_bet * multiplier)
-    elif dealer_score > player_score:
-        st.session_state.combo = 0
-        st.session_state.msg = f"😢 딜러 승리... (딜러: {dealer_score}점 / 나: {player_score}점)"
-    elif dealer_score < player_score:
-        st.session_state.combo += 1
-        st.session_state.msg = f"🎉 플레이어 승리!! (딜러: {dealer_score}점 / 나: {player_score}점) (수익 {multiplier}배)"
-        st.session_state.coins += st.session_state.current_bet + int(st.session_state.current_bet * multiplier)
-    else:
-        st.session_state.msg = "🤝 무승부! (배팅액을 돌려받습니다)"
-        st.session_state.coins += st.session_state.current_bet
     
-    save_user_data() # DB 저장
+    if not all_busted:
+        while dealer_score < 17:
+            st.session_state.dealer_hand.append(st.session_state.deck.pop())
+            dealer_score = calculate_score(st.session_state.dealer_hand)
+
+    msgs = []
+    earned = 0
+    combo_won = False
+
+    for i, hand in enumerate(st.session_state.player_hands):
+        p_score = calculate_score(hand)
+        bet = st.session_state.hand_bets[i]
+        prefix = f"[핸드 {i+1}] " if len(st.session_state.player_hands) > 1 else ""
+
+        if p_score > 21:
+            msgs.append(f"{prefix}💥 BUST! (21 초과)")
+        elif dealer_score > 21:
+            msgs.append(f"{prefix}🎉 딜러 BUST! 승리!")
+            earned += bet * 2; combo_won = True
+        elif p_score > dealer_score:
+            msgs.append(f"{prefix}🎉 승리! ({p_score} vs {dealer_score})")
+            earned += bet * 2; combo_won = True
+        elif p_score < dealer_score:
+            msgs.append(f"{prefix}😢 패배... ({p_score} vs {dealer_score})")
+        else:
+            msgs.append(f"{prefix}🤝 무승부")
+            earned += bet
+
+    st.session_state.coins += earned
+    if combo_won: st.session_state.combo += 1
+    else: st.session_state.combo = 0
+    
+    st.session_state.msg = "<br>".join(msgs)
+    save_user_data()
 
 # ==========================================
 # 🖥️ 게임 화면 (UI)
@@ -191,12 +245,9 @@ if not st.session_state.logged_in:
             st.session_state.coins = user_data['coins']
             st.session_state.debt = user_data['debt']
             st.session_state.combo = user_data['combo']
+            st.session_state.last_rescue = user_data.get('last_rescue')
             st.session_state.deck = create_deck()
-            st.session_state.player_hand = []
-            st.session_state.dealer_hand = []
             st.session_state.game_phase = 'BETTING'
-            st.session_state.current_bet = 0
-            st.session_state.msg = ""
             st.session_state.logged_in = True
             st.rerun()
         else:
@@ -210,19 +261,26 @@ if not st.session_state.logged_in:
             medal = "🥇" if idx == 0 else "🥈" if idx == 1 else "🥉" if idx == 2 else "🏅"
             st.markdown(f"<p style='text-align:center; font-size:1.3rem;'>{medal} <b>{player['username']}</b> : 💰 {player['coins']} 코인</p>", unsafe_allow_html=True)
     except:
-        st.markdown("<p style='text-align:center;'>랭킹을 불러오는 중입니다...</p>", unsafe_allow_html=True)
+        pass
 
 else:
     # --- 메인 게임 화면 ---
     st.markdown(f"<p style='text-align:right; color:#94a3b8;'>👤 플레이어: {st.session_state.username}</p>", unsafe_allow_html=True)
     
+    # 지갑 전광판
     col_a, col_b = st.columns(2)
     with col_a: st.markdown(f'<div class="coin-box">💰 내 지갑: {st.session_state.coins}</div>', unsafe_allow_html=True)
     with col_b:
-        if st.session_state.debt > 0: st.markdown(f'<div class="coin-box debt-box">💀 빚: {st.session_state.debt}</div>', unsafe_allow_html=True)
-        elif st.session_state.combo >= 2: st.markdown(f'<div class="coin-box combo-box">🔥 {st.session_state.combo} 연승 중!</div>', unsafe_allow_html=True)
-        else: st.markdown(f'<div class="coin-box" style="color:#aaa; border-color:#aaa;">🎲 대기 중</div>', unsafe_allow_html=True)
+        if st.session_state.coins <= 0 and st.session_state.debt > 0:
+            st.markdown(f'<div class="coin-box debt-box">🚨 DIE / LOSE 예정</div>', unsafe_allow_html=True)
+        elif st.session_state.debt > 0:
+            st.markdown(f'<div class="coin-box debt-box">💀 사채 빚: {st.session_state.debt}</div>', unsafe_allow_html=True)
+        elif st.session_state.combo >= 2: 
+            st.markdown(f'<div class="coin-box combo-box">🔥 {st.session_state.combo} 연승 중!</div>', unsafe_allow_html=True)
+        else: 
+            st.markdown(f'<div class="coin-box" style="color:#aaa; border-color:#aaa;">🎲 대기 중</div>', unsafe_allow_html=True)
 
+    # 배팅 화면 & 파산 상태 처리
     if st.session_state.game_phase == 'BETTING':
         if st.session_state.coins > 0:
             max_bet = st.session_state.coins
@@ -230,47 +288,89 @@ else:
             st.write("") 
             if st.button("🚀 게임 시작 (DEAL)"): start_game(bet_amount); st.rerun()
                 
-            if st.session_state.debt > 0 and st.session_state.coins >= 1500:
+            if st.session_state.debt > 0 and st.session_state.coins >= st.session_state.debt:
                 st.divider()
                 st.markdown('<div class="btn-yellow">', unsafe_allow_html=True)
-                if st.button("👼 1500 코인으로 빚 청산하기"):
-                    st.session_state.coins -= 1500
+                if st.button(f"👼 사채 {st.session_state.debt} 코인 전액 상환하기"):
+                    st.session_state.coins -= st.session_state.debt
                     st.session_state.debt = 0
                     save_user_data()
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
         else:
-            st.error("💸 파산하셨습니다... 돈을 빌려야 합니다.")
-            st.markdown('<div class="btn-red">', unsafe_allow_html=True)
-            if st.button("💀 사채업자에게 1000 코인 빌리기 (빚 1500 증가)"):
-                st.session_state.coins += 1000
-                st.session_state.debt += 1500
-                save_user_data()
-                st.rerun()
-            st.markdown('</div>', unsafe_allow_html=True)
+            # 🚨 돈이 없는데 사채 빚까지 있는 경우 -> DIE / LOSE 폭탄 작동!
+            if st.session_state.debt > 0:
+                st.markdown("<h2 style='text-align:center; color:#f43f5e;'>💀 DIE / LOSE 💀</h2>", unsafe_allow_html=True)
+                st.error("사채업자에게 빌린 돈을 갚지 못하고 파산했습니다! 조폭들에게 잡혀가 장기가 털리고 신분 세탁(계정 초기화)을 당합니다.")
+                st.write("")
+                if st.button("🔄 새로운 신분으로 인생 세탁하기 (초기화)"):
+                    reset_game_completely()
+                    st.rerun()
+            else:
+                # 빚이 없는 순수 파산 상태 -> 3분 타이머 또는 사채 선택 활성화
+                time_left = get_rescue_time_left()
+                if time_left <= 0:
+                    st.markdown('<div class="btn-blue">', unsafe_allow_html=True)
+                    if st.button("👼 구제금융 500 코인 받기"): claim_rescue(); st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    m, s = divmod(time_left, 60)
+                    st.error(f"💸 코인을 모두 잃었습니다! 다음 구제금융까지: {m}분 {s}초")
+                    if st.button("🔄 남은 시간 확인"): st.rerun()
+                
+                st.markdown("<p style='text-align:center; color:#aaa; margin: 15px 0;'>--- OR ---</p>", unsafe_allow_html=True)
+                st.markdown('<div class="btn-red">', unsafe_allow_html=True)
+                if st.button("💀 신체포기각서 쓰고 사채 1000 코인 즉시 대출 (갚을 땐 1500 / 올인 파산 시 DIE)"):
+                    st.session_state.coins = 1000
+                    st.session_state.debt = 1500
+                    save_user_data()
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
 
+    # 플레이 화면
     elif st.session_state.game_phase in ['PLAYING', 'DEALER_TURN', 'GAME_OVER']:
         st.markdown("<h3 style='text-align:center; color:#e0e7ff; margin-top:10px;'>🤖 딜러</h3>", unsafe_allow_html=True)
         hide_dealer_card = (st.session_state.game_phase in ['PLAYING', 'DEALER_TURN'])
         st.markdown(render_cards(st.session_state.dealer_hand, hide_second=hide_dealer_card), unsafe_allow_html=True)
         if not hide_dealer_card: st.markdown(f"<p style='text-align:center; color:#94a3b8; margin-top:-10px;'>딜러 점수: {calculate_score(st.session_state.dealer_hand)}점</p>", unsafe_allow_html=True)
-
         st.divider()
 
+        # 여러 핸드(스플릿) 표시
         st.markdown("<h3 style='text-align:center; color:#e0e7ff;'>🙋‍♂️ 플레이어</h3>", unsafe_allow_html=True)
-        st.markdown(render_cards(st.session_state.player_hand), unsafe_allow_html=True)
-        st.markdown(f"<p style='text-align:center; color:#facc15; font-size:1.4rem; margin-top:-10px;'>현재 점수: <b>{calculate_score(st.session_state.player_hand)}점</b> (배팅: {st.session_state.current_bet})</p>", unsafe_allow_html=True)
+        for i, hand in enumerate(st.session_state.player_hands):
+            is_active = (i == st.session_state.active_hand and st.session_state.game_phase == 'PLAYING')
+            border_style = "border: 2px solid #facc15; border-radius: 15px; padding-bottom: 10px;" if is_active else ""
+            
+            st.markdown(f"<div style='{border_style}'>", unsafe_allow_html=True)
+            if len(st.session_state.player_hands) > 1:
+                st.markdown(f"<p style='text-align:center; color:#facc15; font-size:1.2rem;'>--- 핸드 {i+1} ---</p>", unsafe_allow_html=True)
+            st.markdown(render_cards(hand), unsafe_allow_html=True)
+            st.markdown(f"<p style='text-align:center; color:#facc15; font-size:1.2rem; margin-top:-10px;'>점수: <b>{calculate_score(hand)}점</b> (배팅: {st.session_state.hand_bets[i]})</p>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
+        # 액션 버튼
         if st.session_state.game_phase == 'PLAYING':
-            c1, c2, c3 = st.columns(3)
-            with c1: 
-                if st.button("🃏 HIT"): hit(); st.rerun()
-            with c2: 
-                if st.button("🛑 STAND"): st.session_state.game_phase = 'DEALER_TURN'; st.rerun()
-            with c3:
-                if len(st.session_state.player_hand) == 2 and st.session_state.coins >= st.session_state.current_bet:
+            idx = st.session_state.active_hand
+            hand = st.session_state.player_hands[idx]
+            
+            can_split = (len(hand) == 2 and len(st.session_state.player_hands) == 1 and 
+                         hand[0][1:] == hand[1][1:] and 
+                         st.session_state.coins >= st.session_state.hand_bets[0])
+
+            cols = st.columns(4 if can_split else 3)
+            with cols[0]:
+                if st.button("🃏 HIT", use_container_width=True): hit(); st.rerun()
+            with cols[1]:
+                if st.button("🛑 STAND", use_container_width=True): next_hand_or_dealer(); st.rerun()
+            with cols[2]:
+                if len(hand) == 2 and st.session_state.coins >= st.session_state.hand_bets[idx]:
                     st.markdown('<div class="btn-yellow">', unsafe_allow_html=True)
-                    if st.button("🔥 DOUBLE DOWN"): double_down(); st.rerun()
+                    if st.button("🔥 DOUBLE", use_container_width=True): double_down(); st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+            if can_split:
+                with cols[3]:
+                    st.markdown('<div class="btn-blue">', unsafe_allow_html=True)
+                    if st.button("✂️ SPLIT", use_container_width=True): split(); st.rerun()
                     st.markdown('</div>', unsafe_allow_html=True)
 
         elif st.session_state.game_phase == 'DEALER_TURN':
@@ -280,10 +380,8 @@ else:
 
         elif st.session_state.game_phase == 'GAME_OVER':
             st.divider()
-            if "승리" in st.session_state.msg or "대박" in st.session_state.msg: st.success(st.session_state.msg)
-            elif "무승부" in st.session_state.msg: st.info(st.session_state.msg)
-            else: st.error(st.session_state.msg)
-                
+            st.markdown(f"<div style='text-align:center; font-size:1.5rem; background:rgba(0,0,0,0.5); padding:20px; border-radius:10px;'>{st.session_state.msg}</div>", unsafe_allow_html=True)
+            st.write("")
             if st.button("🔄 다음 판 가기 (NEXT)"):
                 st.session_state.game_phase = 'BETTING'
                 st.rerun()
