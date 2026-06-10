@@ -61,7 +61,7 @@ def load_user(username):
     if len(response.data) > 0:
         return response.data[0]
     else:
-        new_user = {"username": username, "coins": 1000, "debt": 0, "combo": 0, "last_rescue": None}
+        new_user = {"username": username, "coins": 1000, "debt": 0, "combo": 0, "last_rescue": None, "loan_count": 0}
         res = supabase.table("casino_players").insert(new_user).execute()
         return res.data[0]
 
@@ -70,7 +70,8 @@ def save_user_data():
         supabase.table("casino_players").update({
             "coins": st.session_state.coins,
             "debt": st.session_state.debt,
-            "combo": st.session_state.combo
+            "combo": st.session_state.combo,
+            "loan_count": st.session_state.loan_count
         }).eq("username", st.session_state.username).execute()
 
 def get_rescue_time_left():
@@ -78,7 +79,7 @@ def get_rescue_time_left():
     last = datetime.fromisoformat(st.session_state.last_rescue)
     now = datetime.now(timezone.utc)
     diff = now - last
-    if diff > timedelta(minutes=3): return 0  # ⏰ 3분으로 수정!
+    if diff > timedelta(minutes=3): return 0
     return (timedelta(minutes=3) - diff).seconds
 
 def claim_rescue():
@@ -90,10 +91,11 @@ def claim_rescue():
     st.session_state.last_rescue = now_iso
 
 def reset_game_completely():
-    # 💀 DIE / LOSE 발생 시 완전히 처음부터 초기화하는 함수
+    # 💀 DIE 발생 시 완전히 처음부터 초기화 (대출 횟수도 리셋)
     st.session_state.coins = 1000
     st.session_state.debt = 0
     st.session_state.combo = 0
+    st.session_state.loan_count = 0
     st.session_state.game_phase = 'BETTING'
     st.session_state.player_hands = []
     st.session_state.dealer_hand = []
@@ -245,6 +247,7 @@ if not st.session_state.logged_in:
             st.session_state.coins = user_data['coins']
             st.session_state.debt = user_data['debt']
             st.session_state.combo = user_data['combo']
+            st.session_state.loan_count = user_data.get('loan_count', 0)
             st.session_state.last_rescue = user_data.get('last_rescue')
             st.session_state.deck = create_deck()
             st.session_state.game_phase = 'BETTING'
@@ -272,7 +275,7 @@ else:
     with col_a: st.markdown(f'<div class="coin-box">💰 내 지갑: {st.session_state.coins}</div>', unsafe_allow_html=True)
     with col_b:
         if st.session_state.coins <= 0 and st.session_state.debt > 0:
-            st.markdown(f'<div class="coin-box debt-box">🚨 DIE / LOSE 예정</div>', unsafe_allow_html=True)
+            st.markdown(f'<div class="coin-box debt-box">🚨 DIE 예정</div>', unsafe_allow_html=True)
         elif st.session_state.debt > 0:
             st.markdown(f'<div class="coin-box debt-box">💀 사채 빚: {st.session_state.debt}</div>', unsafe_allow_html=True)
         elif st.session_state.combo >= 2: 
@@ -298,16 +301,16 @@ else:
                     st.rerun()
                 st.markdown('</div>', unsafe_allow_html=True)
         else:
-            # 🚨 돈이 없는데 사채 빚까지 있는 경우 -> DIE / LOSE 폭탄 작동!
+            # 🚨 빚이 있는 상태에서 파산했을 경우 -> 💀 DIE 폭탄!
             if st.session_state.debt > 0:
-                st.markdown("<h2 style='text-align:center; color:#f43f5e;'>💀 DIE / LOSE 💀</h2>", unsafe_allow_html=True)
+                st.markdown("<h2 style='text-align:center; color:#f43f5e;'>💀 DIE 💀</h2>", unsafe_allow_html=True)
                 st.error("사채업자에게 빌린 돈을 갚지 못하고 파산했습니다! 조폭들에게 잡혀가 장기가 털리고 신분 세탁(계정 초기화)을 당합니다.")
                 st.write("")
-                if st.button("🔄 새로운 신분으로 인생 세탁하기 (초기화)"):
+                if st.button("🔄 새로운 신분으로 인생 세탁하기 (강제 초기화)"):
                     reset_game_completely()
                     st.rerun()
             else:
-                # 빚이 없는 순수 파산 상태 -> 3분 타이머 또는 사채 선택 활성화
+                # 빚이 없는 순수 파산 상태
                 time_left = get_rescue_time_left()
                 if time_left <= 0:
                     st.markdown('<div class="btn-blue">', unsafe_allow_html=True)
@@ -319,13 +322,24 @@ else:
                     if st.button("🔄 남은 시간 확인"): st.rerun()
                 
                 st.markdown("<p style='text-align:center; color:#aaa; margin: 15px 0;'>--- OR ---</p>", unsafe_allow_html=True)
-                st.markdown('<div class="btn-red">', unsafe_allow_html=True)
-                if st.button("💀 신체포기각서 쓰고 사채 1000 코인 즉시 대출 (갚을 땐 1500 / 올인 파산 시 DIE)"):
-                    st.session_state.coins = 1000
-                    st.session_state.debt = 1500
-                    save_user_data()
-                    st.rerun()
-                st.markdown('</div>', unsafe_allow_html=True)
+                
+                # 👿 사채 대출 로직 (3회 제한)
+                if st.session_state.loan_count < 3:
+                    st.markdown('<div class="btn-red">', unsafe_allow_html=True)
+                    if st.button(f"💀 사채 1000 코인 즉시 대출 (남은 기회: {3 - st.session_state.loan_count}번)"):
+                        st.session_state.coins = 1000
+                        st.session_state.debt = 1500
+                        st.session_state.loan_count += 1
+                        save_user_data()
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
+                else:
+                    # 3회 초과 시 강제 DIE 버튼 활성화
+                    st.markdown('<div class="btn-red">', unsafe_allow_html=True)
+                    if st.button("💀 대출 한도 초과! 억지로 돈 빌리기 (누르면 즉시 DIE)"):
+                        reset_game_completely()
+                        st.rerun()
+                    st.markdown('</div>', unsafe_allow_html=True)
 
     # 플레이 화면
     elif st.session_state.game_phase in ['PLAYING', 'DEALER_TURN', 'GAME_OVER']:
