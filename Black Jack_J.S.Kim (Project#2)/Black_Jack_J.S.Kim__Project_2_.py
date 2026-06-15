@@ -6,18 +6,19 @@ from datetime import datetime, timedelta, timezone
 # --- 🎮 Web Page Configuration ---
 st.set_page_config(page_title="JS Casino Blackjack", page_icon="🃏", layout="centered")
 
-# --- 🔗 데이터베이스 연결 ---
+# --- 🔗 데이터베이스 연결 (방어형 코드로 강화!) ---
 @st.cache_resource
 def init_connection():
-    url = st.secrets["supabase"]["url"]
-    key = st.secrets["supabase"]["key"]
-    return create_client(url, key)
+    try:
+        url = st.secrets["supabase"]["url"]
+        key = st.secrets["supabase"]["key"]
+        return create_client(url, key)
+    except Exception:
+        return None
 
-try:
-    supabase = init_connection()
-except Exception as e:
-    st.error("데이터베이스 연결에 실패했습니다. 설정을 확인해주세요.")
-    st.stop()
+def get_supabase():
+    # 필요할 때마다 연결 상태를 확인하고 가져옵니다.
+    return init_connection()
 
 # ==========================================
 # 🧠 세션 상태 (메모리) 초기화
@@ -74,29 +75,39 @@ st.markdown(f"""
 # 💾 데이터베이스 & 시스템 함수
 # ==========================================
 def load_user(username):
-    response = supabase.table("casino_players").select("*").eq("username", username).execute()
-    if len(response.data) > 0:
-        return response.data[0]
-    else:
-        new_user = {
-            "username": username, "coins": 1000, "debt": 0, "combo": 0, "last_rescue": None, "loan_count": 0,
-            "current_title": "새내기", "current_theme": "Classic", "purchased_titles": "새내기", "purchased_themes": "Classic"
-        }
-        res = supabase.table("casino_players").insert(new_user).execute()
-        return res.data[0]
+    try:
+        db = get_supabase()
+        if not db: return None
+        response = db.table("casino_players").select("*").eq("username", username).execute()
+        if len(response.data) > 0:
+            return response.data[0]
+        else:
+            new_user = {
+                "username": username, "coins": 1000, "debt": 0, "combo": 0, "last_rescue": None, "loan_count": 0,
+                "current_title": "새내기", "current_theme": "Classic", "purchased_titles": "새내기", "purchased_themes": "Classic"
+            }
+            res = db.table("casino_players").insert(new_user).execute()
+            return res.data[0]
+    except Exception:
+        return None
 
 def save_user_data():
     if 'username' in st.session_state:
-        supabase.table("casino_players").update({
-            "coins": st.session_state.coins,
-            "debt": st.session_state.debt,
-            "combo": st.session_state.combo,
-            "loan_count": st.session_state.loan_count,
-            "current_title": st.session_state.current_title,
-            "current_theme": st.session_state.current_theme,
-            "purchased_titles": st.session_state.purchased_titles,
-            "purchased_themes": st.session_state.purchased_themes
-        }).eq("username", st.session_state.username).execute()
+        try:
+            db = get_supabase()
+            if db:
+                db.table("casino_players").update({
+                    "coins": st.session_state.coins,
+                    "debt": st.session_state.debt,
+                    "combo": st.session_state.combo,
+                    "loan_count": st.session_state.loan_count,
+                    "current_title": st.session_state.current_title,
+                    "current_theme": st.session_state.current_theme,
+                    "purchased_titles": st.session_state.purchased_titles,
+                    "purchased_themes": st.session_state.purchased_themes
+                }).eq("username", st.session_state.username).execute()
+        except Exception:
+            pass
 
 def get_rescue_time_left():
     if not st.session_state.get('last_rescue'): return 0
@@ -107,12 +118,17 @@ def get_rescue_time_left():
     return (timedelta(minutes=3) - diff).seconds
 
 def claim_rescue():
-    now_iso = datetime.now(timezone.utc).isoformat()
-    supabase.table("casino_players").update({
-        "coins": 500, "last_rescue": now_iso
-    }).eq("username", st.session_state.username).execute()
-    st.session_state.coins = 500
-    st.session_state.last_rescue = now_iso
+    try:
+        db = get_supabase()
+        if db:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            db.table("casino_players").update({
+                "coins": 500, "last_rescue": now_iso
+            }).eq("username", st.session_state.username).execute()
+            st.session_state.coins = 500
+            st.session_state.last_rescue = now_iso
+    except Exception:
+        pass
 
 def reset_game_completely():
     st.session_state.coins = 1000
@@ -238,29 +254,36 @@ if not st.session_state.logged_in:
     if st.button("🚪 카지노 입장하기"):
         if username_input.strip():
             user_data = load_user(username_input.strip())
-            st.session_state.username = user_data['username']
-            st.session_state.coins = user_data['coins']
-            st.session_state.debt = user_data['debt']
-            st.session_state.combo = user_data['combo']
-            st.session_state.loan_count = user_data.get('loan_count', 0)
-            st.session_state.current_title = user_data.get('current_title', '새내기')
-            st.session_state.current_theme = user_data.get('current_theme', 'Classic')
-            st.session_state.purchased_titles = user_data.get('purchased_titles', '새내기')
-            st.session_state.purchased_themes = user_data.get('purchased_themes', 'Classic')
-            st.session_state.last_rescue = user_data.get('last_rescue')
-            st.session_state.deck = create_deck()
-            st.session_state.game_phase = 'BETTING'
-            st.session_state.logged_in = True
-            st.rerun()
+            if user_data:
+                st.session_state.username = user_data['username']
+                st.session_state.coins = user_data['coins']
+                st.session_state.debt = user_data['debt']
+                st.session_state.combo = user_data['combo']
+                st.session_state.loan_count = user_data.get('loan_count', 0)
+                st.session_state.current_title = user_data.get('current_title', '새내기')
+                st.session_state.current_theme = user_data.get('current_theme', 'Classic')
+                st.session_state.purchased_titles = user_data.get('purchased_titles', '새내기')
+                st.session_state.purchased_themes = user_data.get('purchased_themes', 'Classic')
+                st.session_state.last_rescue = user_data.get('last_rescue')
+                st.session_state.deck = create_deck()
+                st.session_state.game_phase = 'BETTING'
+                st.session_state.logged_in = True
+                st.rerun()
+            else:
+                st.error("⚠️ 서버 연결이 지연되고 있습니다. 잠시 후 다시 시도해주세요!")
+        else:
+            st.warning("닉네임을 입력해야 입장할 수 있습니다!")
 
     st.divider()
     st.markdown("<h3 style='text-align:center; color:#facc15;'>🏆 카지노 명예의 전당 (Top 5 갑부)</h3>", unsafe_allow_html=True)
     try:
-        top_players = supabase.table("casino_players").select("username, coins, current_title").order("coins", desc=True).limit(5).execute()
-        for idx, player in enumerate(top_players.data):
-            medal = "🥇" if idx == 0 else "🥈" if idx == 1 else "🥉" if idx == 2 else "🏅"
-            t_title = f"[{player['current_title']}] " if player.get('current_title') else ""
-            st.markdown(f"<p style='text-align:center; font-size:1.3rem;'>{medal} {t_title}<b>{player['username']}</b> : 💰 {player['coins']}</p>", unsafe_allow_html=True)
+        db = get_supabase()
+        if db:
+            top_players = db.table("casino_players").select("username, coins, current_title").order("coins", desc=True).limit(5).execute()
+            for idx, player in enumerate(top_players.data):
+                medal = "🥇" if idx == 0 else "🥈" if idx == 1 else "🥉" if idx == 2 else "🏅"
+                t_title = f"[{player['current_title']}] " if player.get('current_title') else ""
+                st.markdown(f"<p style='text-align:center; font-size:1.3rem;'>{medal} {t_title}<b>{player['username']}</b> : 💰 {player['coins']}</p>", unsafe_allow_html=True)
     except: pass
 
 else:
